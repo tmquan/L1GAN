@@ -182,8 +182,8 @@ class L1GAN(LightningModule):
         self.gen.apply(weights_init_normal)
         self.dis.apply(weights_init_normal)
 
-        self.adversarial_loss = SoftDiceLoss() #torch.nn.BCELoss()
-        # self.probability_loss = SoftDiceLoss() #torch.nn.BCELoss()
+        self.adv_loss = torch.nn.BCELoss() #SoftDiceLoss() #torch.nn.BCELoss()
+        # self.probability_loss = torch.nn.BCELoss() #SoftDiceLoss() #torch.nn.BCELoss()
 
         # cache for generated images
         self.fake_imgs = None
@@ -222,7 +222,7 @@ class L1GAN(LightningModule):
         if optimizer_idx == 0:
             fake = torch.ones((batchs, 1)).to(self.device)
             fake_pred = self.dis(fake_imgs)
-            fake_loss = self.adversarial_loss(fake_pred, fake)  
+            fake_loss = self.adv_loss(fake_pred, fake)  
 
             ell1_loss = nn.L1Loss()(fake_imgs, imgs)
 
@@ -241,12 +241,12 @@ class L1GAN(LightningModule):
             # how well can it label as real?
             true = torch.ones((batchs, 1)).to(self.device)
             real_pred = self.dis(imgs)
-            real_loss = self.adversarial_loss(real_pred, true) 
+            real_loss = self.adv_loss(real_pred, true) 
 
             # how well can it label as fake?
             fake = torch.zeros((batchs, 1)).to(self.device)
             fake_pred = self.dis(fake_imgs.detach())
-            fake_loss = self.adversarial_loss(fake_pred, fake)
+            fake_loss = self.adv_loss(fake_pred, fake)
 
             # dis loss is the average of these
             d_loss = (real_loss + fake_loss) / 2
