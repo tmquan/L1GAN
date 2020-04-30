@@ -33,7 +33,7 @@ from tensorpack.dataflow import BatchData, MultiProcessRunner, PrintData, MapDat
 import albumentations as AB
 
 from Data import MultiLabelCXRDataset
-
+from Losses import *
 def DiceScore(output, target, smooth=1.0, epsilon=1e-7, axis=(2, 3)):
     """
     Compute mean dice coefficient over all abnormality classes.
@@ -189,8 +189,24 @@ class L1GAN(LightningModule):
         self.fake_imgs = None
         self.real_imgs = None
 
+        self.loss_fn = LSGAN(dis = self.dis)
+        
     def forward(self, z):
         return self.gen(z)
+
+    # def optimizer_step(self, current_epoch, batch_idx, optimizer, optimizer_idx,
+    #                    second_order_closure=None):
+    #     # print(optimizer.step())
+    #     # print(1e4*optimizer.param_groups[0]['lr'])
+    #     if optimizer_idx==0:
+    #         self.lr_scale = 1e8
+    #         print(optimizer.param_groups[0]['lr'])
+    #         self.lr_scale *= optimizer.param_groups[0]['lr']
+            
+    #     if optimizer_idx==1:
+    #         print(optimizer.param_groups[0]['lr'])
+    #         self.lr_scale *= optimizer.param_groups[0]['lr']
+    #         print(self.lr_scale)
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         imgs, lbls = batch
@@ -204,10 +220,10 @@ class L1GAN(LightningModule):
         fake_imgs = self.gen(z)
 
         # Calculate w1 and w2
-        e1 = self.hparams.e1
+        e1 = self.hparams.e1 
         e2 = self.hparams.e2
         assert e2 > e1
-        ep = self.current_epoch
+        ep = self.current_epoch 
         if ep < e1:
             w1 = 1
             w2 = 0
@@ -215,18 +231,19 @@ class L1GAN(LightningModule):
             w1 = 0
             w2 = 1
         else:
-            w1 = (ep-e1) / (e2-e1)
-            w2 = (e2-ep) / (e2-e1)
+            w2 = (ep-e1) / (e2-e1)
+            w1 = (e2-ep) / (e2-e1)
 
+        # w2 = 1
         # train generator
         if optimizer_idx == 0:
-            fake = torch.ones((batchs, 1)).to(self.device)
-            fake_pred = self.dis(fake_imgs)
-            fake_loss = self.adv_loss(fake_pred, fake)  
-
-            ell1_loss = nn.L1Loss()(fake_imgs, imgs)
-
-            g_loss = w2*fake_loss + w1*ell1_loss
+            # fake = torch.ones((batchs, 1)).to(self.device)
+            # fake_pred = self.dis(fake_imgs)
+            # fake_loss = self.adv_loss(fake_pred, fake)  
+            # fake_loss = -torch.mean(fake_pred)
+            # ell1_loss = nn.L1Loss()(fake_imgs, imgs)
+            ell1_loss = torch.mean(torch.abs(fake_imgs - imgs) / 2.0)
+            g_loss = w2*self.loss_fn.gen_loss(imgs, fake_imgs) + w1*ell1_loss
 
             tqdm_dict = {'g_loss': g_loss}
             output = OrderedDict({
@@ -238,18 +255,21 @@ class L1GAN(LightningModule):
 
         # train dis
         if optimizer_idx == 1:
-            # how well can it label as real?
-            true = torch.ones((batchs, 1)).to(self.device)
-            real_pred = self.dis(imgs)
-            real_loss = self.adv_loss(real_pred, true) 
+            # # how well can it label as real?
+            # true = torch.ones((batchs, 1)).to(self.device)
+            # real_pred = self.dis(imgs)
+            # real_loss = self.adv_loss(real_pred, true) 
+            # # real_loss = -torch.mean(real_pred)
 
-            # how well can it label as fake?
-            fake = torch.zeros((batchs, 1)).to(self.device)
-            fake_pred = self.dis(fake_imgs.detach())
-            fake_loss = self.adv_loss(fake_pred, fake)
+            # # how well can it label as fake?
+            # fake = torch.zeros((batchs, 1)).to(self.device)
+            # fake_pred = self.dis(fake_imgs.detach())
+            # fake_loss = self.adv_loss(fake_pred, fake)
+            # # fake_loss = torch.mean(fake_pred)
 
-            # dis loss is the average of these
-            d_loss = (real_loss + fake_loss) / 2
+            # # dis loss is the average of these
+            # d_loss = (real_loss + fake_loss) / 2
+            d_loss = self.loss_fn.dis_loss(imgs, fake_imgs)
 
             tqdm_dict = {'d_loss': d_loss}
             output = OrderedDict({
@@ -266,7 +286,17 @@ class L1GAN(LightningModule):
 
         opt_g = torch.optim.Adam(self.gen.parameters(), lr=lr, betas=(b1, b2))
         opt_d = torch.optim.Adam(self.dis.parameters(), lr=lr, betas=(b1, b2))
-        return [opt_g, opt_d], []
+
+        # gen_sched = {'scheduler': ExponentialLR(gen_opt, 0.99),
+        #                          'interval': 'step'}  # called after each training step
+        # dis_sched = CosineAnnealing(discriminator_opt, T_max=10) # called every epoch
+        # sch_g = {'scheduler': torch.optim.lr_scheduler.StepLR(opt_g, step_size=11054, gamma=0.99999), #ExponentialLR(opt_g, 0.999999),
+        #          'interval': 'step'}
+        sch_g = {'scheduler': torch.optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=10),
+                 'interval': 'step'}    
+        sch_d = {'scheduler': torch.optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=10),
+                 'interval': 'step'}  
+        return [opt_g, opt_d], [sch_g, sch_d]
 
     def train_dataloader(self):
         ds_train = MultiLabelCXRDataset(folder=self.hparams.data,
@@ -426,8 +456,8 @@ if __name__ == '__main__':
     parser.add_argument('--eval', action='store_true', help='run offline evaluation instead of training')
 
     # Dataset params
-    parser.add_argument("--e1", type=int, default=10, help="Epoch 1")
-    parser.add_argument("--e2", type=int, default=100, help="Epoch 2")
+    parser.add_argument("--e1", type=int, default=1, help="Epoch 1")
+    parser.add_argument("--e2", type=int, default=20, help="Epoch 2")
     parser.add_argument('--epochs', type=int, default=250)
     parser.add_argument('--types', type=int, default=-1)
     parser.add_argument('--shape', type=int, default=256)
