@@ -38,6 +38,9 @@ import torchxrayvision as xrv
 from Data import MultiLabelCXRDataset
 from Losses import *
 
+from fastai import *
+from fastai.vision import *
+from fastai.callbacks import *
 
 def DiceScore(output, target, smooth=1.0, epsilon=1e-7, axis=(2, 3)):
     """
@@ -156,7 +159,7 @@ class Generator(nn.Module):
 
             nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, 1, 7, stride=1, padding=3),
+            nn.Conv2d(64, 3, 7, stride=1, padding=3),
             nn.Tanh(),
         )
 
@@ -171,11 +174,11 @@ class Discriminator(nn.Module):
     def __init__(self, hparams):
         super().__init__()
         self.hparams = hparams
-        # self.feature_extractor = getattr(torchvision.models, 'densenet121')(
-        #     pretrained=True)
+        self.feature_extractor = getattr(torchvision.models, 'densenet121')(
+            pretrained=True)
         # self.feature_extractor.features.conv0 = nn.Conv2d(1, 64,
         #                                         kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-        self.feature_extractor = xrv.models.DenseNet(weights="all")
+        # self.feature_extractor = xrv.models.DenseNet(weights="all")
         self.feature_extractor.classifier = nn.Sequential(
             nn.Dropout(0.25),
             nn.LeakyReLU(0.2, inplace=True),
@@ -223,7 +226,7 @@ class L1GAN(LightningModule):
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         imgs, lbls = batch
-        imgs = imgs.to(self.device) / 128.0 - 1.0
+        # imgs = imgs.to(self.device) / 128.0 - 1.0
         lbls = lbls.to(self.device)
         self.real_imgs = imgs
 
@@ -243,6 +246,7 @@ class L1GAN(LightningModule):
             pred = self.dis.classify(fake_imgs)
             if self.hparams.note=='regular':
                 g_loss = self.loss_fn.gen_loss(imgs, fake_imgs)
+
             elif self.hparams.note=='warmup':
                 # Calculate w1 and w2
                 e1 = self.hparams.e1
@@ -304,50 +308,72 @@ class L1GAN(LightningModule):
                  'interval': 'step'}
         return [opt_g, opt_d], [sch_g, sch_d]
 
+    def train_val_dataloader(self):
+        extra = [*zoom_crop(scale=(0.5, 1.3), p=0.5), 
+                 *rand_resize_crop(self.hparams.shape, max_scale=1.3),
+                 squish(scale=(0.9, 1.2), p=0.5),
+                 tilt(direction=(0, 3), magnitude=(-0.3, 0.3), p=0.5),
+                 # cutout(n_holes=(1, 5), length=(10, 30), p=0.1)
+                 ]
+        transforms = get_transforms(max_rotate=11, max_zoom=1.3, max_lighting=0.1, 
+                                    max_warp=0.15, p_affine=0.5, p_lighting=0.3, xtra_tfms=extra)
+        transforms = list(transforms); transforms[1] = []
+        dset = (
+            ImageList.from_df(df=pd.read_csv(os.path.join(self.hparams.data, 'covid_train_v5.csv')), 
+                path=os.path.join(self.hparams.data, 'data'), cols='Images')
+            .split_by_rand_pct(0.2, seed=hparams.seed)
+            .label_from_df(cols=['Covid', 'Airspace_Opacity', 'Consolidation', 'Pneumonia'], label_cls=MultiCategoryList)
+            .transform(transforms, size=self.hparams.shape)
+            .databunch(bs=self.hparams.batch, num_workers=32)
+            .normalize(imagenet_stats)
+        )
+        return dset.train_dl.dl, dset.valid_dl.dl
+
     def train_dataloader(self):
-        ds_train = MultiLabelCXRDataset(folder=self.hparams.data,
-                                        is_train='train',
-                                        fname='covid_train_v5.csv',
-                                        types=self.hparams.types,
-                                        pathology=self.hparams.pathology,
-                                        resize=int(self.hparams.shape),
-                                        balancing='up')
-
-        ds_train.reset_state()
-        ag_train = [
-            # imgaug.ColorSpace(mode=cv2.COLOR_GRAY2RGB),
-            imgaug.RandomChooseAug([
-                imgaug.Albumentations(AB.Blur(blur_limit=4, p=0.25)),
-                imgaug.Albumentations(AB.MotionBlur(blur_limit=4, p=0.25)),
-                imgaug.Albumentations(AB.MedianBlur(blur_limit=4, p=0.25)),
-            ]),
-            imgaug.Albumentations(AB.CLAHE(tile_grid_size=(32, 32), p=0.5)),
-            imgaug.RandomOrderAug([
-                imgaug.Affine(shear=10, border=cv2.BORDER_CONSTANT,
-                              interp=cv2.INTER_AREA),
-                imgaug.Affine(translate_frac=(0.01, 0.02), border=cv2.BORDER_CONSTANT,
-                              interp=cv2.INTER_AREA),
-                imgaug.Affine(scale=(0.5, 1.0), border=cv2.BORDER_CONSTANT,
-                              interp=cv2.INTER_AREA),
-            ]),
-            imgaug.RotationAndCropValid(max_deg=10, interp=cv2.INTER_AREA),
-            imgaug.GoogleNetRandomCropAndResize(crop_area_fraction=(0.8, 1.0),
-                                                aspect_ratio_range=(0.8, 1.2),
-                                                interp=cv2.INTER_AREA, target_shape=self.hparams.shape),
-            imgaug.ColorSpace(mode=cv2.COLOR_RGB2GRAY),
-            imgaug.ToFloat32(),
-        ]
-        ds_train = AugmentImageComponent(ds_train, ag_train, 0)
-
-        ds_train = BatchData(ds_train, self.hparams.batch, remainder=True)
-        if self.hparams.debug:
-            ds_train = FixedSizeData(ds_train, 2)
-        # ds_train = MultiProcessRunner(ds_train, num_proc=4, num_prefetch=16)
-        ds_train = PrintData(ds_train)
-        ds_train = MapData(ds_train,
-                           lambda dp: [torch.tensor(np.transpose(dp[0], (0, 3, 1, 2))),
-                                       torch.tensor(dp[1]).float()])
+        ds_train, ds_valid = self.train_val_dataloader()
         return ds_train
+        # ds_train = MultiLabelCXRDataset(folder=self.hparams.data,
+        #                                 is_train='train',
+        #                                 fname='covid_train_v5.csv',
+        #                                 types=self.hparams.types,
+        #                                 pathology=self.hparams.pathology,
+        #                                 resize=int(self.hparams.shape),
+        #                                 balancing='up')
+
+        # ds_train.reset_state()
+        # ag_train = [
+        #     # imgaug.ColorSpace(mode=cv2.COLOR_GRAY2RGB),
+        #     imgaug.RandomChooseAug([
+        #         imgaug.Albumentations(AB.Blur(blur_limit=4, p=0.25)),
+        #         imgaug.Albumentations(AB.MotionBlur(blur_limit=4, p=0.25)),
+        #         imgaug.Albumentations(AB.MedianBlur(blur_limit=4, p=0.25)),
+        #     ]),
+        #     imgaug.Albumentations(AB.CLAHE(tile_grid_size=(32, 32), p=0.5)),
+        #     imgaug.RandomOrderAug([
+        #         imgaug.Affine(shear=10, border=cv2.BORDER_CONSTANT,
+        #                       interp=cv2.INTER_AREA),
+        #         imgaug.Affine(translate_frac=(0.01, 0.02), border=cv2.BORDER_CONSTANT,
+        #                       interp=cv2.INTER_AREA),
+        #         imgaug.Affine(scale=(0.5, 1.0), border=cv2.BORDER_CONSTANT,
+        #                       interp=cv2.INTER_AREA),
+        #     ]),
+        #     imgaug.RotationAndCropValid(max_deg=10, interp=cv2.INTER_AREA),
+        #     imgaug.GoogleNetRandomCropAndResize(crop_area_fraction=(0.8, 1.0),
+        #                                         aspect_ratio_range=(0.8, 1.2),
+        #                                         interp=cv2.INTER_AREA, target_shape=self.hparams.shape),
+        #     imgaug.ColorSpace(mode=cv2.COLOR_RGB2GRAY),
+        #     imgaug.ToFloat32(),
+        # ]
+        # ds_train = AugmentImageComponent(ds_train, ag_train, 0)
+        # ds_train = MultiProcessRunner(ds_train, num_proc=4, num_prefetch=16)
+        # ds_train = BatchData(ds_train, self.hparams.batch, remainder=True)
+        # # if self.hparams.debug:
+        # #     ds_train = FixedSizeData(ds_train, 2)
+        # ds_train = PrintData(ds_train)
+        # ds_train = MapData(ds_train,
+        #                    lambda dp: [torch.tensor(np.transpose(dp[0], (0, 3, 1, 2))),
+        #                                torch.tensor(dp[1]).float()])
+        # return ds_train
 
     def on_epoch_end(self):
         batchs = 16
@@ -373,55 +399,53 @@ class L1GAN(LightningModule):
         self.logger.experiment.add_graph(self.viz, z)
 
     def val_dataloader(self):
-        """Summary
-
-        Returns:
-            TYPE: Description
-        """
-        ds_valid = MultiLabelCXRDataset(folder=self.hparams.data,
-                                        is_train='valid',
-                                        fname='covid_test_v5.csv',
-                                        types=self.hparams.types,
-                                        pathology=self.hparams.pathology,
-                                        resize=int(self.hparams.shape),)  
-
-        ds_valid.reset_state()
-        ag_valid = [
-            imgaug.Resize(self.hparams.shape, interp=cv2.INTER_AREA),
-            imgaug.ColorSpace(mode=cv2.COLOR_RGB2GRAY),
-            imgaug.ToFloat32(),
-        ]
-        ds_valid = AugmentImageComponent(ds_valid, ag_valid, 0)
-        ds_valid = BatchData(ds_valid, self.hparams.batch, remainder=True)
-        # ds_valid = MultiProcessRunner(ds_valid, num_proc=4, num_prefetch=16)
-        ds_valid = PrintData(ds_valid)
-        ds_valid = MapData(ds_valid,
-                           lambda dp: [torch.tensor(np.transpose(dp[0], (0, 3, 1, 2))),
-                                       torch.tensor(dp[1]).float()])
+        ds_train, ds_valid = self.train_val_dataloader()
         return ds_valid
+        # ds_valid = MultiLabelCXRDataset(folder=self.hparams.data,
+        #                                 is_train='valid',
+        #                                 fname='covid_test_v5.csv',
+        #                                 types=self.hparams.types,
+        #                                 pathology=self.hparams.pathology,
+        #                                 resize=int(self.hparams.shape),)  
+
+        # ds_valid.reset_state()
+        # ag_valid = [
+        #     imgaug.Resize(self.hparams.shape, interp=cv2.INTER_AREA),
+        #     imgaug.ColorSpace(mode=cv2.COLOR_RGB2GRAY),
+        #     imgaug.ToFloat32(),
+        # ]
+        # ds_valid = AugmentImageComponent(ds_valid, ag_valid, 0)
+        # ds_valid = MultiProcessRunner(ds_valid, num_proc=4, num_prefetch=16)
+        # ds_valid = BatchData(ds_valid, self.hparams.batch, remainder=True)
+        # ds_valid = PrintData(ds_valid)
+        # ds_valid = MapData(ds_valid,
+        #                    lambda dp: [torch.tensor(np.transpose(dp[0], (0, 3, 1, 2))),
+        #                                torch.tensor(dp[1]).float()])
+        # return ds_valid
 
     def test_dataloader(self):
-        ds_test = MultiLabelCXRDataset(folder=self.hparams.data,
-                                        is_train='valid',
-                                        fname='covid_test_v5.csv',
-                                        types=self.hparams.types,
-                                        pathology=self.hparams.pathology,
-                                        resize=int(self.hparams.shape),)  
+        pass
+        # ds_test = MultiLabelCXRDataset(folder=self.hparams.data,
+        #                                 is_train='valid',
+        #                                 fname='covid_test_v5.csv',
+        #                                 types=self.hparams.types,
+        #                                 pathology=self.hparams.pathology,
+        #                                 resize=int(self.hparams.shape),)  
 
-        ds_test.reset_state()
-        ag_test = [
-            imgaug.Resize(self.hparams.shape, interp=cv2.INTER_AREA),
-            imgaug.ColorSpace(mode=cv2.COLOR_RGB2GRAY),
-            imgaug.ToFloat32(),
-        ]
-        ds_test = AugmentImageComponent(ds_test, ag_test, 0)
-        ds_test = BatchData(ds_test, self.hparams.batch, remainder=True)
+        # ds_test.reset_state()
+        # ag_test = [
+        #     imgaug.Resize(self.hparams.shape, interp=cv2.INTER_AREA),
+        #     imgaug.ColorSpace(mode=cv2.COLOR_RGB2GRAY),
+        #     imgaug.ToFloat32(),
+        # ]
+        # ds_test = AugmentImageComponent(ds_test, ag_test, 0)
         # ds_test = MultiProcessRunner(ds_test, num_proc=4, num_prefetch=16)
-        ds_test = PrintData(ds_test)
-        ds_test = MapData(ds_test,
-                          lambda dp: [torch.tensor(np.transpose(dp[0], (0, 3, 1, 2))),
-                                      torch.tensor(dp[1]).float()])
-        return ds_test
+        # ds_test = BatchData(ds_test, self.hparams.batch, remainder=True)
+        # ds_test = PrintData(ds_test)
+        # ds_test = MapData(ds_test,
+        #                   lambda dp: [torch.tensor(np.transpose(dp[0], (0, 3, 1, 2))),
+        #                               torch.tensor(dp[1]).float()])
+        # return ds_test
 
     def custom_step(self, batch, batch_idx, prefix='val'):
         """Summary
@@ -435,7 +459,7 @@ class L1GAN(LightningModule):
             TYPE: Description
         """
         image, target = batch
-        image = image / 128.0 - 1.0
+        # image = image / 128.0 - 1.0
         # output = self.forward(images)
         output = self.dis.classify(image)
         # loss = self.bce_loss(output, target)
@@ -596,6 +620,7 @@ def main(hparams):
         checkpoint_callback=checkpoint_callback,
         progress_bar_refresh_rate=1,
         early_stop_callback=None,
+        fast_dev_run=hparams.fast_dev_run,
         # train_percent_check=hparams.percent_check,
         # val_percent_check=hparams.percent_check,
         # test_percent_check=hparams.percent_check,
@@ -634,14 +659,15 @@ if __name__ == '__main__':
     parser.add_argument('--info', metavar='DIR', default="train_log")
     parser.add_argument('--gpus', type=int, default=1)
     parser.add_argument('--seed', type=int, default=2020)
-    parser.add_argument('--note', default="warmup", type=str)
-    parser.add_argument('--case', default="gendis", type=str)
+    parser.add_argument('--note', type=str, default="warmup")
+    parser.add_argument('--case', type=str, default="gendis")
     # Inference params
     parser.add_argument('--load', action='store_true')
     parser.add_argument('--pred', action='store_true')
     parser.add_argument('--eval', action='store_true')
 
     # Dataset params
+    parser.add_argument("--fast_dev_run", action='store_true')
     parser.add_argument("--percent_check", type=float, default=0.25)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--e1", type=int, default=0)
