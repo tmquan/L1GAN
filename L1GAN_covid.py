@@ -242,8 +242,10 @@ class L1GAN(LightningModule):
 
         # train generator
         if optimizer_idx == 0:
-            ell1_loss = torch.mean(torch.abs(fake_imgs - imgs) / 2.0)
+            
             pred = self.dis.classify(fake_imgs)
+
+            g_loss = self.loss_fn.gen_loss(imgs, fake_imgs)
             if self.hparams.note=='regular':
                 g_loss = self.loss_fn.gen_loss(imgs, fake_imgs)
 
@@ -262,7 +264,9 @@ class L1GAN(LightningModule):
                 else:
                     w2 = (ep-e1) / (e2-e1)
                     w1 = (e2-ep) / (e2-e1)
-                g_loss = w2*self.loss_fn.gen_loss(imgs, fake_imgs) + w1*ell1_loss 
+                ell1_loss = torch.nn.L1Loss()(fake_imgs, imgs) #torch.mean(torch.abs(fake_imgs - imgs))
+                g_loss *= w2
+                g_loss += w1*ell1_loss 
 
             if self.hparams.case=='gendis':
                 g_loss += torch.nn.BCELoss()(pred, p) + SoftDiceLoss()(pred, p)
@@ -315,9 +319,10 @@ class L1GAN(LightningModule):
                  tilt(direction=(0, 3), magnitude=(-0.3, 0.3), p=0.5),
                  # cutout(n_holes=(1, 5), length=(10, 30), p=0.1)
                  ]
-        transforms = get_transforms(max_rotate=11, max_zoom=1.3, max_lighting=0.1, 
+        transforms = get_transforms(max_rotate=11, max_zoom=1.3, max_lighting=0.1, do_flip=False, 
                                     max_warp=0.15, p_affine=0.5, p_lighting=0.3, xtra_tfms=extra)
-        transforms = list(transforms); transforms[1] = []
+        transforms = list(transforms); 
+        transforms[1] = []
         dset = (
             ImageList.from_df(df=pd.read_csv(os.path.join(self.hparams.data, 'covid_train_v5.csv')), 
                 path=os.path.join(self.hparams.data, 'data'), cols='Images')
@@ -376,7 +381,7 @@ class L1GAN(LightningModule):
         # return ds_train
 
     def on_epoch_end(self):
-        batchs = 16
+        batchs = 10
         n = torch.randn(batchs, self.hparams.latent_dim).to(self.device)
         p = torch.empty(batchs, self.hparams.types).random_(2).to(self.device)
         z = torch.cat([n, p*2-1], dim=1)
@@ -385,11 +390,11 @@ class L1GAN(LightningModule):
         self.fake_imgs = self.gen(z)
 
         grid = torchvision.utils.make_grid(
-            self.fake_imgs[:batchs] / 2.0 + 0.5, normalize=True)
+            self.fake_imgs[:batchs] / 2.0 + 0.5, normalize=True, nrow=5)
         self.logger.experiment.add_image(f'fake_imgs', grid, self.current_epoch)
 
         grid = torchvision.utils.make_grid(
-            self.real_imgs[:batchs] / 2.0 + 0.5, normalize=True)
+            self.real_imgs[:batchs] / 2.0 + 0.5, normalize=True, nrow=5)
         self.logger.experiment.add_image(f'real_imgs', grid, self.current_epoch)
 
         self.viz = nn.Sequential(
