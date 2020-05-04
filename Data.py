@@ -42,7 +42,7 @@ class MultiLabelCXRDataset(df.RNGDataFlow):
         self.df = pd.read_csv(self.csvfile)
         self.df.columns = self.df.columns.str.replace(' ', '_')
         self.df = self.df.infer_objects()
-        
+        print(self.df.head)
         self.pathology = pathology
         self.balancing = balancing
         if self.balancing == 'up':
@@ -95,17 +95,20 @@ class MultiLabelCXRDataset(df.RNGDataFlow):
                     label.append(self.df.iloc[idx]['Airspace_Opacity'])
                     label.append(self.df.iloc[idx]['Consolidation'])
                     label.append(self.df.iloc[idx]['Pneumonia'])
-                elif self.types == 2:
+                elif self.types == 1:
                     assert self.pathology is not None
-                    label.append(self.df.iloc[idx]['No_Finding'])
+                    # label.append(self.df.iloc[idx]['No_Finding'])
                     label.append(self.df.iloc[idx][self.pathology])
                 else:
-                    label.append(-1)
+                    # label.append(-1)
+                    pass
 
                 # Try catch exception
                 label = np.nan_to_num(label, copy=True, nan=0)
                 label = np.array(label, dtype=np.float32)
                 types = label.copy()
+                # if self.is_train != 'train':
+                #     print(label)
                 yield [image, types]
             elif self.is_train == 'test':
                 yield [image] 

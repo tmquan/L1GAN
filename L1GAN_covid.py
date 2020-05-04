@@ -328,7 +328,7 @@ class L1GAN(LightningModule):
                 path=os.path.join(self.hparams.data, 'data'), cols='Images')
             .split_by_rand_pct(0.2, seed=hparams.seed)
             .label_from_df(cols=['Covid', 'Airspace_Opacity', 'Consolidation', 'Pneumonia'], label_cls=MultiCategoryList)
-            .transform(transforms, size=self.hparams.shape)
+            .transform(transforms, size=self.hparams.shape, padding_mode='zeros')
             .databunch(bs=self.hparams.batch, num_workers=32)
             .normalize(imagenet_stats)
         )
