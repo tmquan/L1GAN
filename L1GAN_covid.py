@@ -11,6 +11,7 @@ from collections import OrderedDict
 
 from pprint import pprint
 import sklearn.metrics
+from sklearn.utils import resample
 import random
 import pandas as pd
 import numpy as np
@@ -111,6 +112,78 @@ def weights_init_normal(m):
         torch.nn.init.normal_(m.weight.data, 1.0, 0.02)
         torch.nn.init.constant_(m.bias.data, 0.0)
 
+dependencies = ['torch', 'torchvision']
+
+from torch.hub import load_state_dict_from_url
+from torchvision.models.resnet import ResNet, Bottleneck
+
+
+model_urls = {
+    'resnext101_32x8d': 'https://download.pytorch.org/models/ig_resnext101_32x8-c38310e5.pth',
+    'resnext101_32x16d': 'https://download.pytorch.org/models/ig_resnext101_32x16-c6f796b0.pth',
+    'resnext101_32x32d': 'https://download.pytorch.org/models/ig_resnext101_32x32-e4b90b00.pth',
+    'resnext101_32x48d': 'https://download.pytorch.org/models/ig_resnext101_32x48-3e41cc8a.pth',
+}
+
+
+def _resnext(arch, block, layers, pretrained, progress, **kwargs):
+    model = ResNet(block, layers, **kwargs)
+    state_dict = load_state_dict_from_url(model_urls[arch], progress=progress)
+    model.load_state_dict(state_dict)
+    return model
+
+
+def resnext101_32x8d_wsl(progress=True, **kwargs):
+    """Constructs a ResNeXt-101 32x8 model pre-trained on weakly-supervised data
+    and finetuned on ImageNet from Figure 5 in
+    `"Exploring the Limits of Weakly Supervised Pretraining" <https://arxiv.org/abs/1805.00932>`_
+
+    Args:
+        progress (bool): If True, displays a progress bar of the download to stderr.
+    """
+    kwargs['groups'] = 32
+    kwargs['width_per_group'] = 8
+    return _resnext('resnext101_32x8d', Bottleneck, [3, 4, 23, 3], True, progress, **kwargs)
+
+
+def resnext101_32x16d_wsl(progress=True, **kwargs):
+    """Constructs a ResNeXt-101 32x16 model pre-trained on weakly-supervised data
+    and finetuned on ImageNet from Figure 5 in
+    `"Exploring the Limits of Weakly Supervised Pretraining" <https://arxiv.org/abs/1805.00932>`_
+
+    Args:
+        progress (bool): If True, displays a progress bar of the download to stderr.
+    """
+    kwargs['groups'] = 32
+    kwargs['width_per_group'] = 16
+    return _resnext('resnext101_32x16d', Bottleneck, [3, 4, 23, 3], True, progress, **kwargs)
+
+
+def resnext101_32x32d_wsl(progress=True, **kwargs):
+    """Constructs a ResNeXt-101 32x32 model pre-trained on weakly-supervised data
+    and finetuned on ImageNet from Figure 5 in
+    `"Exploring the Limits of Weakly Supervised Pretraining" <https://arxiv.org/abs/1805.00932>`_
+
+    Args:
+        progress (bool): If True, displays a progress bar of the download to stderr.
+    """
+    kwargs['groups'] = 32
+    kwargs['width_per_group'] = 32
+    return _resnext('resnext101_32x32d', Bottleneck, [3, 4, 23, 3], True, progress, **kwargs)
+
+
+def resnext101_32x48d_wsl(progress=True, **kwargs):
+    """Constructs a ResNeXt-101 32x48 model pre-trained on weakly-supervised data
+    and finetuned on ImageNet from Figure 5 in
+    `"Exploring the Limits of Weakly Supervised Pretraining" <https://arxiv.org/abs/1805.00932>`_
+
+    Args:
+        progress (bool): If True, displays a progress bar of the download to stderr.
+    """
+    kwargs['groups'] = 32
+    kwargs['width_per_group'] = 48
+    return _resnext('resnext101_32x48d', Bottleneck, [3, 4, 23, 3], True, progress, **kwargs)
+
 
 class Generator(nn.Module):
     def __init__(self, hparams):
@@ -174,19 +247,25 @@ class Discriminator(nn.Module):
     def __init__(self, hparams):
         super().__init__()
         self.hparams = hparams
-        self.feature_extractor = getattr(torchvision.models, 'densenet121')(
-            pretrained=True)
+        # self.feature_extractor = getattr(torchvision.models, 'densenet121')(pretrained=True)
+        # self.feature_extractor = getattr(torchvision.models, 'densenet121')(pretrained=True)
         # self.feature_extractor.features.conv0 = nn.Conv2d(1, 64,
         #                                         kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
         # self.feature_extractor = xrv.models.DenseNet(weights="all")
-        self.feature_extractor.classifier = nn.Sequential(
-            nn.Dropout(0.25),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
+        # self.feature_extractor.classifier = nn.Sequential(
+        #     nn.Dropout(0.25),
+        #     nn.LeakyReLU(0.2, inplace=True),
+        # )
+        # print(self.feature_extractor)
+        # self.feature_extractor.eval()
+        # self.adv_layer = nn.Sequential(nn.Linear(1024, 1), nn.Tanh())
+        # self.aux_layer = nn.Sequential(nn.Linear(1024, self.hparams.types), nn.Tanh())
+
+        self.feature_extractor = resnext101_32x16d_wsl(progress=True)
         print(self.feature_extractor)
         # self.feature_extractor.eval()
-        self.adv_layer = nn.Sequential(nn.Linear(1024, 1), nn.Tanh())
-        self.aux_layer = nn.Sequential(nn.Linear(1024, self.hparams.types), nn.Tanh())
+        self.adv_layer = nn.Sequential(nn.Linear(1000, 1), nn.Tanh())
+        self.aux_layer = nn.Sequential(nn.Linear(1000, self.hparams.types), nn.Tanh())
 
     def forward(self, img):
         out = self.feature_extractor(img)
@@ -220,7 +299,7 @@ class L1GAN(LightningModule):
         self.real_imgs = None
 
         self.loss_fn = LSGAN(dis=self.dis)
-
+        # self.loss_fn = WGAN_GP(dis=self.dis)
     def forward(self, z):
         return self.gen(z)
 
@@ -323,10 +402,62 @@ class L1GAN(LightningModule):
                                     max_warp=0.15, p_affine=0.5, p_lighting=0.3, xtra_tfms=extra)
         transforms = list(transforms); 
         transforms[1] = []
+
+        df=pd.read_csv(os.path.join(self.hparams.data, 'covid_train_v5.csv'))
+        balancing='up'
+        if balancing == 'up':
+            df_majority = df[df[self.hparams.pathology]==0]
+            df_minority = df[df[self.hparams.pathology]==1]
+            print(df_majority[self.hparams.pathology].value_counts())
+            df_minority_upsampled = resample(df_minority, 
+                                     replace=True,     # sample with replacement
+                                     n_samples=df_majority[self.hparams.pathology].value_counts()[0],    # to match majority class
+                                     random_state=hparams.seed) # reproducible results
+
+            df_upsampled = pd.concat([df_majority, df_minority_upsampled])
+            df = df_upsampled
+
         dset = (
-            ImageList.from_df(df=pd.read_csv(os.path.join(self.hparams.data, 'covid_train_v5.csv')), 
+            ImageList.from_df(df=df, 
                 path=os.path.join(self.hparams.data, 'data'), cols='Images')
-            .split_by_rand_pct(0.2, seed=hparams.seed)
+            .split_by_rand_pct(0.0, seed=hparams.seed)
+            .label_from_df(cols=['Covid', 'Airspace_Opacity', 'Consolidation', 'Pneumonia'], label_cls=MultiCategoryList)
+            .transform(transforms, size=self.hparams.shape, padding_mode='zeros')
+            .databunch(bs=self.hparams.batch, num_workers=32)
+            .normalize(imagenet_stats)
+        )
+        return dset.train_dl.dl, dset.valid_dl.dl
+
+    def eval_dataloader(self):
+        extra = [*zoom_crop(scale=(0.5, 1.3), p=0.5), 
+                 *rand_resize_crop(self.hparams.shape, max_scale=1.3),
+                 squish(scale=(0.9, 1.2), p=0.5),
+                 tilt(direction=(0, 3), magnitude=(-0.3, 0.3), p=0.5),
+                 # cutout(n_holes=(1, 5), length=(10, 30), p=0.1)
+                 ]
+        transforms = get_transforms(max_rotate=11, max_zoom=1.3, max_lighting=0.1, do_flip=False, 
+                                    max_warp=0.15, p_affine=0.5, p_lighting=0.3, xtra_tfms=extra)
+        transforms = list(transforms); 
+        transforms[1] = []
+
+        df=pd.read_csv(os.path.join(self.hparams.data, 'covid_test_v5.csv'))
+        # balancing='up'
+        # if balancing == 'up':
+        #     df_majority = df[df[self.hparams.pathology]==0]
+        #     df_minority = df[df[self.hparams.pathology]==1]
+        #     print(df_majority[self.hparams.pathology].value_counts())
+        #     df_minority_upsampled = resample(df_minority, 
+        #                              replace=True,     # sample with replacement
+        #                              n_samples=df_majority[self.hparams.pathology].value_counts()[0],    # to match majority class
+        #                              random_state=hparams.seed) # reproducible results
+
+        #     df_upsampled = pd.concat([df_majority, df_minority_upsampled])
+        #     df = df_upsampled
+
+        dset = (
+            ImageList.from_df(df=df, 
+                path=os.path.join(self.hparams.data, 'data'), cols='Images')
+            .split_by_rand_pct(1.0, seed=hparams.seed)
             .label_from_df(cols=['Covid', 'Airspace_Opacity', 'Consolidation', 'Pneumonia'], label_cls=MultiCategoryList)
             .transform(transforms, size=self.hparams.shape, padding_mode='zeros')
             .databunch(bs=self.hparams.batch, num_workers=32)
@@ -404,7 +535,7 @@ class L1GAN(LightningModule):
         self.logger.experiment.add_graph(self.viz, z)
 
     def val_dataloader(self):
-        ds_train, ds_valid = self.train_val_dataloader()
+        ds_train, ds_valid = self.eval_dataloader()
         return ds_valid
         # ds_valid = MultiLabelCXRDataset(folder=self.hparams.data,
         #                                 is_train='valid',
